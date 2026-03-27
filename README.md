@@ -2,10 +2,10 @@
   <img src="logo.png" width="140" alt="Claude Logo" />
 </p>
 
-<h1 align="center"><strong>Claude Watch</strong></h1>
+<h1 align="center"><strong>Codex Watch (fork)</strong></h1>
 
 <p align="center">
-  Control Claude Code from your Apple Watch.<br/>
+  Control Codex CLI from your Apple Watch.<br/>
   See terminal output, approve permissions, and send voice commands — all from your wrist.
 </p>
 
@@ -21,7 +21,7 @@ https://github.com/user-attachments/assets/5f478c28-2086-4696-9d76-e43dda853201
                                                       |
                                             HTTP Hooks | PTY stdin
                                                       v
-                                              Claude Code Session
+                                               Codex CLI Session
 ```
 
 ## What It Does
@@ -29,9 +29,9 @@ https://github.com/user-attachments/assets/5f478c28-2086-4696-9d76-e43dda853201
 - **Live terminal output** on your Apple Watch — see what Claude is doing in real-time
 - **Permission prompts** — approve or deny Claude's actions from your wrist (Edit file? Run command?)
 - **Dynamic questions** — answer `AskUserQuestion` prompts with all options displayed
-- **Voice commands** — dictate commands to Claude via watchOS dictation
+- **Voice tasks** — dictate a task on watch, bridge runs `codex exec "<task>"`
 - **iPhone companion** — pairing UI, connection status, terminal preview, permission approvals
-- **Bridge server** — Node.js server on your Mac that connects Claude Code to the watch via HTTP hooks + SSE
+- **Bridge server** — Node.js server on your Mac that connects Codex CLI to the watch via hooks + SSE
 
 ## Architecture
 
@@ -39,11 +39,11 @@ The system has three components:
 
 ### 1. Bridge Server (Mac)
 A Node.js HTTP server (`skill/bridge/server.js`) that:
-- Receives events from Claude Code via [HTTP hooks](https://docs.anthropic.com/en/docs/claude-code/hooks) (`PostToolUse`, `PermissionRequest`, `Stop`, etc.)
+- Receives events from Codex CLI via [hooks.json hooks](https://developers.openai.com/codex/hooks) (`PreToolUse`, `PostToolUse`, `Stop`, etc.)
 - Streams events to connected clients via Server-Sent Events (SSE)
 - Handles pairing with a 6-digit code + session token
 - Advertises itself on the local network via Bonjour/mDNS
-- Blocks on `PermissionRequest` hooks — waits for watch/phone approval, then returns the decision to Claude Code
+- Streams tool and lifecycle events to watch/phone clients in real time
 
 ### 2. iPhone App
 A SwiftUI iOS app that:
@@ -67,7 +67,7 @@ A SwiftUI watchOS app that:
 - macOS with Node.js 18+
 - Xcode 16+ with watchOS SDK
 - Apple Watch on the same Wi-Fi as your Mac
-- Claude Code CLI installed
+- Codex CLI installed
 
 ### Apple Watch Wi-Fi Setup
 1. Make sure your Apple Watch is connected to the **same Wi-Fi network** as the Mac running your Claude Code session
@@ -80,9 +80,9 @@ cd skill/bridge
 npm install
 ```
 
-### 2. Install Claude Code hooks
+### 2. Install Codex hooks
 
-This configures all Claude Code sessions to stream events to the bridge:
+This configures Codex CLI hooks to stream events to the bridge:
 
 ```bash
 ./skill/setup-hooks.sh
@@ -100,7 +100,7 @@ node server.js
 You'll see:
 ```
 ╔═══════════════════════════════════════╗
-║        CLAUDE WATCH BRIDGE            ║
+║         CODEX WATCH BRIDGE            ║
 ╠═══════════════════════════════════════╣
 ║  Pairing Code:  648505                ║
 ║  IP Address:    192.168.1.4           ║
@@ -127,9 +127,11 @@ In Xcode:
 
 **Apple Watch:** The app auto-discovers the bridge via Bonjour. If that fails, enter the IP address shown in the bridge banner manually.
 
-### 6. Use Claude Code normally
+### 6. Use Codex normally
 
-Start any Claude Code session in a terminal. Every tool use (Read, Edit, Bash, Grep) streams to the watch and phone in real-time. Permission prompts appear as interactive cards.
+You can either:
+- run Codex normally in a terminal (hook-based telemetry), or
+- dictate a task from watch — bridge executes it as one-shot `codex exec "<task>"` and streams output back live.
 
 ## Project Structure
 
@@ -197,37 +199,29 @@ claude-watch/
 
 ### Event Flow (Mac -> Watch)
 
-1. Claude Code runs a tool (e.g., Edit a file)
-2. The `PostToolUse` HTTP hook fires, POSTing to the bridge server
+1. Codex runs a tool (for now this is primarily `Bash`)
+2. The `PreToolUse` / `PostToolUse` hook fires and is forwarded to the bridge server
 3. Bridge pushes the event to all connected SSE clients
 4. The watch/phone receives the SSE event and renders it as a terminal line
 
-### Permission Flow (Mac -> Watch -> Mac)
+### Current Codex limitations
 
-1. Claude Code hits a permission prompt (e.g., "Do you want to edit this file?")
-2. The `PermissionRequest` HTTP hook fires — bridge **blocks** the response
-3. Bridge pushes a `permission-request` SSE event with the question + options
-4. Watch shows the approval sheet with all options as tappable buttons
-5. User taps an option — watch sends the decision back to the bridge via HTTP
-6. Bridge returns the decision to Claude Code's hook — Claude continues or stops
+Codex hooks currently provide lifecycle + tool events, but the Claude-style blocking
+`PermissionRequest` flow does not exist in the same form. This fork supports:
+- live telemetry/monitoring via hooks, and
+- watch voice task execution via one-shot `codex exec`.
 
-### AskUserQuestion Flow
+## Codex Hooks
 
-Same as permission flow, but the hook data includes `tool_input.questions` with dynamic options (label + description). The watch renders these as a scrollable list matching the terminal's numbered choices.
+The `setup-hooks.sh` script installs hooks in `~/.codex/hooks.json`:
 
-## Claude Code Hooks
-
-The `setup-hooks.sh` script installs these HTTP hooks globally in `~/.claude/settings.json`:
-
-| Hook Event | Purpose | Blocking? |
-|-----------|---------|-----------|
-| `PostToolUse` | Capture tool output (file reads, edits, commands) | No (async) |
-| `PreToolUse` | Capture tool invocations | No (async) |
-| `PermissionRequest` | Forward permission prompts to watch | **Yes** (up to 10 min) |
-| `Stop` | Detect when Claude finishes responding | No (async) |
-| `PostToolUseFailure` | Capture errors | No (async) |
-| `StopFailure` | Capture API errors | No (async) |
-| `Notification` | Idle/permission notifications | No (async) |
+| Hook Event | Purpose |
+|-----------|---------|
+| `SessionStart` | mark session activity |
+| `UserPromptSubmit` | capture prompt lifecycle |
+| `PreToolUse` | capture tool invocations |
+| `PostToolUse` | capture tool output metadata |
+| `Stop` | detect when Codex finishes responding |
 
 ## Configuration
 
@@ -257,7 +251,7 @@ The `setup-hooks.sh` script installs these HTTP hooks globally in `~/.claude/set
 | Xcode | 16+ |
 | iOS | 17.0 |
 | watchOS | 10.0 |
-| Claude Code | 2.1+ |
+| Codex CLI | latest |
 
 ## Troubleshooting
 
@@ -276,13 +270,12 @@ The `setup-hooks.sh` script installs these HTTP hooks globally in `~/.claude/set
 - The bridge must be on the same LAN as the iPhone
 
 ### Permission prompts don't appear on watch
-- Verify hooks are installed: check `~/.claude/settings.json` for hook entries
-- Check bridge logs for "Hook: PermissionRequest received"
+- Verify hooks are installed: check `~/.codex/hooks.json` for entries
+- Check bridge logs for "Hook: Codex ... received"
 - Ensure the watch is connected to the bridge (green status dot)
 
 ### Bridge exits immediately
-- The bridge no longer auto-spawns Claude. It waits for events from hooks.
-- Start Claude Code in a separate terminal — hooks will forward events automatically.
+- Start Codex in a separate terminal — hooks will forward events automatically.
 
 ## License
 

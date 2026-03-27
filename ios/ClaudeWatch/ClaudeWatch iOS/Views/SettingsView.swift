@@ -35,7 +35,7 @@ struct SettingsView: View {
                 }
                 Button("Cancel", role: .cancel) { }
             } message: {
-                Text("You will need to re-pair with a new code from Claude Code.")
+                Text("You will need to re-pair with a new code from Codex bridge.")
             }
         }
     }
@@ -90,9 +90,9 @@ struct SettingsView: View {
                     .foregroundStyle(Color.subtleText)
             }
 
-            Link(destination: URL(string: "https://github.com/anthropics/claude-code")!) {
+            Link(destination: URL(string: "https://github.com/openai/codex")!) {
                 HStack {
-                    Text("Claude Code")
+                    Text("Codex CLI")
                         .foregroundStyle(.white)
                     Spacer()
                     Image(systemName: "arrow.up.right")
