@@ -13,7 +13,7 @@ struct SessionView: View {
                 // Top bar
                 HStack(spacing: 4) {
                     ClaudeMascot(size: 14)
-                    Text("Claude")
+                    Text("Codex")
                         .font(.system(size: 10, weight: .bold))
                         .foregroundColor(Theme.Text.primary)
                     Spacer()

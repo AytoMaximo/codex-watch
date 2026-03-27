@@ -2,32 +2,29 @@ import http from "node:http";
 import crypto from "node:crypto";
 import os from "node:os";
 import fs from "node:fs";
-import { execSync } from "node:child_process";
 import { spawn as childSpawn } from "node:child_process";
 import { Bonjour } from "bonjour-service";
 
-// Resolve the full path to the claude binary.
-// node-pty uses posix_spawnp which may not inherit the interactive shell PATH.
-function findClaudeBinary() {
+// Resolve the full path to the requested assistant binary.
+function findAgentBinary() {
+  const configured = process.env.AGENT_BIN?.trim() || "codex";
+  const namesToTry = [configured, "codex", "claude"];
+
   // Check common install locations directly — avoids shell session noise
-  const candidates = [
-    `${os.homedir()}/.local/bin/claude`,
-    "/usr/local/bin/claude",
-    "/opt/homebrew/bin/claude",
-  ];
+  const candidates = namesToTry.flatMap((name) => ([
+    `${os.homedir()}/.local/bin/${name}`,
+    `/usr/local/bin/${name}`,
+    `/opt/homebrew/bin/${name}`,
+  ]));
+
   for (const c of candidates) {
     try { fs.accessSync(c, fs.constants.X_OK); return c; } catch { /* continue */ }
   }
-  // Last resort: try which (without interactive shell flags)
-  try {
-    return execSync("which claude 2>/dev/null", { encoding: "utf-8" }).trim();
-  } catch { /* fall through */ }
-  throw new Error(
-    "Could not find the 'claude' binary. Ensure Claude Code is installed and on your PATH."
-  );
+  // Fall back to command name for PATH resolution at spawn time.
+  return configured;
 }
 
-const CLAUDE_BIN = findClaudeBinary();
+const AGENT_BIN = findAgentBinary();
 
 // ---------------------------------------------------------------------------
 // Logging
@@ -87,6 +84,7 @@ const pendingPermissionBodies = new Map();
 
 // PTY --
 let ptyProcess = null;
+let taskProcess = null;
 
 // Bonjour --
 let bonjourInstance = null;
@@ -202,17 +200,17 @@ function formatSseMessage(entry) {
 // PTY management
 // ---------------------------------------------------------------------------
 
-function spawnClaude(cwd) {
+function spawnAgent(cwd) {
   const cols = parseInt(process.env.COLUMNS, 10) || 120;
   const rows = parseInt(process.env.LINES, 10) || 40;
 
-  log("info", `Spawning claude in PTY via script (cwd: ${cwd})`);
-  log("info", `Using claude binary: ${CLAUDE_BIN}`);
+  log("info", `Spawning agent PTY via script (cwd: ${cwd})`);
+  log("info", `Using agent binary: ${AGENT_BIN}`);
 
   // Use macOS `script` command to allocate a PTY, since node-pty's posix_spawnp
   // can be blocked by sandboxed environments. `script -q /dev/null` gives us a
   // real PTY while child_process.spawn handles the process lifecycle.
-  ptyProcess = childSpawn("script", ["-q", "/dev/null", CLAUDE_BIN], {
+  ptyProcess = childSpawn("script", ["-q", "/dev/null", AGENT_BIN], {
     cwd,
     env: {
       ...process.env,
@@ -248,14 +246,14 @@ function spawnClaude(cwd) {
     ptyProcess = null;
   });
 
-  log("info", "Claude PTY process started, pid:", ptyProcess.pid);
+  log("info", "Agent PTY process started, pid:", ptyProcess.pid);
 }
 
 function writeToPty(text) {
   if (!ptyProcess) {
-    // Auto-spawn Claude when the first command arrives
+    // Auto-spawn agent when the first command arrives
     const cwd = process.argv[2] || process.env.HOME || process.cwd();
-    spawnClaude(cwd);
+    spawnAgent(cwd);
     // Wait briefly for the PTY to initialize
     setTimeout(() => {
       if (ptyProcess) {
@@ -265,6 +263,65 @@ function writeToPty(text) {
     return;
   }
   ptyProcess.stdin.write(text);
+}
+
+function shouldUseCodexExec() {
+  const normalized = AGENT_BIN.toLowerCase();
+  return normalized.endsWith("/codex") || normalized === "codex";
+}
+
+function runOneShotTask(commandText) {
+  const cwd = process.argv[2] || process.env.HOME || process.cwd();
+  const trimmed = commandText.trim();
+  if (!trimmed) {
+    throw new Error("Command text is empty");
+  }
+  if (taskProcess) {
+    throw new Error("Another task is already running");
+  }
+
+  // For Codex, a one-shot `exec` invocation maps much better to "voice task"
+  // than trying to drive the full-screen interactive TUI via stdin.
+  const args = shouldUseCodexExec() ? ["exec", trimmed] : [trimmed];
+  log("info", `Starting one-shot task: ${AGENT_BIN} ${args.join(" ")}`);
+
+  taskProcess = childSpawn(AGENT_BIN, args, {
+    cwd,
+    env: {
+      ...process.env,
+      TERM: "xterm-256color",
+      COLUMNS: String(parseInt(process.env.COLUMNS, 10) || 120),
+      LINES: String(parseInt(process.env.LINES, 10) || 40),
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+
+  sessionState = "running";
+  pushSseEvent("session", { state: "running", mode: "oneshot" });
+
+  taskProcess.stdout.on("data", (data) => {
+    pushSseEvent("pty-output", { text: data.toString() });
+  });
+
+  taskProcess.stderr.on("data", (data) => {
+    pushSseEvent("pty-output", { text: data.toString() });
+  });
+
+  taskProcess.on("close", (exitCode, signal) => {
+    log("info", `One-shot task exited: code=${exitCode} signal=${signal}`);
+    sessionState = "ended";
+    pushSseEvent("stop", { exitCode, signal, mode: "oneshot" });
+    pushSseEvent("session", { state: "ended", exitCode, signal, mode: "oneshot" });
+    taskProcess = null;
+  });
+
+  taskProcess.on("error", (err) => {
+    log("error", `One-shot task error: ${err.message}`);
+    sessionState = "ended";
+    pushSseEvent("error", { error: err.message, mode: "oneshot" });
+    pushSseEvent("session", { state: "ended", error: err.message, mode: "oneshot" });
+    taskProcess = null;
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -377,12 +434,13 @@ async function handleCommand(req, res) {
 
   // Handle PTY command injection
   if (command !== undefined) {
-    if (!ptyProcess) {
-      return jsonResponse(res, 409, { error: "No active PTY session" });
-    }
     try {
-      writeToPty(command);
-      log("info", `Command injected into PTY (${command.length} chars)`);
+      if (ptyProcess) {
+        writeToPty(command);
+        log("info", `Command injected into PTY (${command.length} chars)`);
+      } else {
+        runOneShotTask(command);
+      }
       return jsonResponse(res, 200, { ok: true });
     } catch (err) {
       return jsonResponse(res, 500, { error: err.message });
@@ -542,11 +600,37 @@ async function handleHookError(req, res) {
   return jsonResponse(res, 200, { ok: true });
 }
 
+async function handleCodexHook(req, res) {
+  if (req.method !== "POST") return jsonResponse(res, 405, { error: "Method not allowed" });
+  let body;
+  try {
+    body = await readBody(req);
+  } catch {
+    return jsonResponse(res, 400, { error: "Invalid JSON" });
+  }
+
+  const event = body.event || "Unknown";
+  const payload = body.payload || {};
+
+  log("info", `Hook: Codex ${event} received`);
+
+  if (event === "PreToolUse" || event === "PostToolUse") {
+    pushSseEvent("tool-output", payload);
+  } else if (event === "Stop") {
+    pushSseEvent("stop", payload);
+  } else {
+    pushSseEvent("session", { state: "running", sourceEvent: event, ...payload });
+  }
+
+  return jsonResponse(res, 200, { ok: true });
+}
+
 function handleStatus(_req, res) {
   return jsonResponse(res, 200, {
     state: sessionState,
     sessionId: SESSION_ID,
     hasPty: ptyProcess !== null,
+    hasTask: taskProcess !== null,
     sseClients: sseClients.size,
     pendingPermissions: pendingPermissions.size,
     eventBufferSize: sseBuffer.length,
@@ -566,6 +650,7 @@ const routes = {
   "POST /hooks/stop": handleHookStop,
   "POST /hooks/task-complete": handleHookTaskComplete,
   "POST /hooks/error": handleHookError,
+  "POST /hooks/codex-event": handleCodexHook,
   "GET /status": handleStatus,
 };
 
@@ -632,7 +717,7 @@ async function startServer() {
   // Advertise via Bonjour/mDNS
   bonjourInstance = new Bonjour();
   bonjourService = bonjourInstance.publish({
-    name: `Claude Watch Bridge (${os.hostname()})`,
+    name: `Codex Watch Bridge (${os.hostname()})`,
     type: "claude-watch",
     protocol: "tcp",
     port: boundPort,
@@ -665,7 +750,7 @@ async function startServer() {
   // Print pairing info prominently
   console.log("");
   console.log("╔═══════════════════════════════════════╗");
-  console.log("║        CLAUDE WATCH BRIDGE            ║");
+  console.log("║         CODEX WATCH BRIDGE            ║");
   console.log("╠═══════════════════════════════════════╣");
   console.log(`║  Pairing Code:  ${code}                ║`);
   console.log(`║  IP Address:    ${lanIP.padEnd(20)}║`);
@@ -696,6 +781,12 @@ async function startServer() {
     if (ptyProcess) {
       try {
         ptyProcess.kill();
+      } catch { /* ignore */ }
+    }
+
+    if (taskProcess) {
+      try {
+        taskProcess.kill();
       } catch { /* ignore */ }
     }
 

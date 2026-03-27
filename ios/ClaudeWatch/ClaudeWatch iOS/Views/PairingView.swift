@@ -95,7 +95,7 @@ struct PairingView: View {
     }
 
     private var bottomInstruction: some View {
-        Text("Run /claude-watch in Claude Code to get started")
+        Text("Run Codex + bridge on your Mac to get started")
             .font(.system(size: 13, design: .monospaced))
             .foregroundStyle(Color.subtleText)
             .multilineTextAlignment(.center)

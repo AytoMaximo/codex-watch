@@ -1,24 +1,24 @@
 ---
-name: claude-watch
-description: Bridge your Claude Code session to the Claude Watch app on Apple Watch
+name: codex-watch
+description: Bridge your Codex CLI session to the watch app on Apple Watch
 author: shobhit
 version: 0.1.0
 ---
 
-# Claude Watch Bridge
+# Codex Watch Bridge
 
-Starts a local bridge server that connects your active Claude Code session
-to the Claude Watch iOS/watchOS app.
+Starts a local bridge server that connects your active Codex CLI session
+to the iOS/watchOS app.
 
 ## What it does
 - Runs a Node.js bridge server on your LAN
-- Registers HTTP hooks for real-time event forwarding
+- Registers Codex hooks for real-time event forwarding
 - Generates a 6-digit pairing code for the iPhone app
 - Enables voice commands from your Apple Watch
 
 ## Usage
-Run `/claude-watch` to start the bridge.
-Enter the pairing code in the Claude Watch iPhone app.
+Run the bridge and install hooks with `./skill/setup-hooks.sh`.
+Enter the pairing code in the iPhone app.
 
 ## Setup
 The bridge requires Node.js 18+ and the `node-pty` package.
